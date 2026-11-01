@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.venv310/
+.env
+.env.*
+!.env.example
+backend_log.txt
+
+# Runtime data and patient files
+uploads/*
+reports/*
+!uploads/.gitkeep
+!reports/.gitkeep
+
+# Node / React
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
+# Backup files
+*.backup
+
+# Python virtual environments
+.venv_test/
+# Python test and cache files
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Frontend dependencies and build output
+frontend_react/node_modules/
+frontend_react/dist/
+
+# Local backup and log files
+*.log

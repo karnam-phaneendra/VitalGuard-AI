@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Hospital System - Patient Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --primary: #6366f1;
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --success: #10b981;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 30px;
+        }
+
+        input {
+            flex: 1;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #475569;
+            background: #1e293b;
+            color: white;
+        }
+
+        button {
+            padding: 12px 24px;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            padding: 20px;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .vitals-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .vital-item {
+            background: rgba(255, 255, 255, 0.03);
+            padding: 15px;
+            border-radius: 12px;
+            text-align: center;
+        }
+
+        .vital-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            display: block;
+        }
+
+        .vital-label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .badge-danger { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+        .badge-success { background: rgba(16, 185, 129, 0.2); color: var(--success); }
+
+        #chartContainer {
+            height: 300px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏥 Patient Monitoring Dashboard</h1>
+        
+        <div class="search-box">
+            <input type="text" id="patientIdInput" placeholder="Enter Patient ID (e.g. 1a2b3c4d)">
+            <button onclick="loadPatientData()">View Dashboard</button>
+        </div>
+
+        <div id="dashboardContent" style="display: none;">
+            <div class="grid">
+                <!-- Patient Info -->
+                <div class="card">
+                    <h2 id="pName">Patient Name</h2>
+                    <p id="pDetails" style="color: var(--text-muted)"></p>
+                    <div id="riskLevel" class="badge">Risk Level: Unknown</div>
+                </div>
+
+                <!-- Latest Vitals -->
+                <div class="card">
+                    <h2>Current Vitals</h2>
+                    <div class="vitals-grid">
+                        <div class="vital-item">
+                            <span class="vital-label">Heart Rate</span>
+                            <span id="vHR" class="vital-value">--</span>
+                            <span class="vital-label">BPM</span>
+                        </div>
+                        <div class="vital-item">
+                            <span class="vital-label">SpO2</span>
+                            <span id="vSpO2" class="vital-value">--</span>
+                            <span class="vital-label">%</span>
+                        </div>
+                        <div class="vital-item">
+                            <span class="vital-label">Temperature</span>
+                            <span id="vTemp" class="vital-value">--</span>
+                            <span class="vital-label">°C</span>
+                        </div>
+                        <div class="vital-item">
+                            <span class="vital-label">Pressure</span>
+                            <span id="vBP" class="vital-value">--</span>
+                            <span class="vital-label">mmHg</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Billing & Insurance -->
+                <div class="card">
+                    <h2>Billing & Insurance</h2>
+                    <p>Total Bill: <strong id="totalBill">$0</strong></p>
+                    <p>Insurance: <span id="insStatus" class="badge">Unknown</span></p>
+                    <hr style="opacity: 0.1">
+                    <p>Doctor Decision: <span id="dcStatus" class="badge">N/A</span></p>
+                    <p id="dcReason" style="font-size: 0.8rem; color: var(--text-muted)"></p>
+                </div>
+
+                <!-- Vitals Graph -->
+                <div class="card" style="grid-column: 1 / -1;">
+                    <h2>Vital Signs History (Heart Rate)</h2>
+                    <div id="chartContainer">
+                        <canvas id="vitalsChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = "http://localhost:8000";
+        let vitalsChart = null;
+
+        async function loadPatientData() {
+            const pid = document.getElementById('patientIdInput').value;
+            if (!pid) return;
+
+            // Load Info
+            const pRes = await fetch(`${API_URL}/patient/${pid}`);
+            if (!pRes.ok) { alert("Patient not found"); return; }
+            const patient = await pRes.json();
+            
+            document.getElementById('pName').innerText = patient.name;
+            document.getElementById('pDetails').innerText = `${patient.age}y | ${patient.disease} | Bed ${patient.bed_number}`;
+            
+            // Load Vitals
+            const vRes = await fetch(`${API_URL}/vitals/${pid}`);
+            const vitals = await vRes.json();
+            
+            if (vitals.length > 0) {
+                const latest = vitals[0];
+                document.getElementById('vHR').innerText = latest.heart_rate || '--';
+                document.getElementById('vSpO2').innerText = latest.spo2 || '--';
+                document.getElementById('vTemp').innerText = latest.temperature || '--';
+                document.getElementById('vBP').innerText = latest.bp || '--';
+                
+                updateChart(vitals);
+            }
+
+            // Load Billing
+            const bRes = await fetch(`${API_URL}/billing/${pid}`);
+            const billing = await bRes.json();
+            document.getElementById('totalBill').innerText = `$${billing.summary.total_bill}`;
+            const insBadge = document.getElementById('insStatus');
+            insBadge.innerText = billing.insurance_status;
+            insBadge.className = 'badge ' + (billing.insurance_status === 'approved' ? 'badge-success' : 'badge-danger');
+
+            // Load Decision
+            const dRes = await fetch(`${API_URL}/decision/${pid}`);
+            const decision = await dRes.json();
+            const dcBadge = document.getElementById('dcStatus');
+            dcBadge.innerText = decision.discharge ? 'READY FOR DISCHARGE' : 'STAY';
+            dcBadge.className = 'badge ' + (decision.discharge ? 'badge-success' : 'badge-danger');
+            document.getElementById('dcReason').innerText = decision.reason;
+            
+            const riskBadge = document.getElementById('riskLevel');
+            riskBadge.innerText = `Risk Level: ${decision.risk_level}`;
+            riskBadge.className = 'badge ' + (decision.risk_level === 'HIGH_RISK' ? 'badge-danger' : 'badge-success');
+
+            document.getElementById('dashboardContent').style.display = 'block';
+        }
+
+        function updateChart(vitals) {
+            const ctx = document.getElementById('vitalsChart').getContext('2d');
+            const labels = vitals.map(v => new Date(v.timestamp).toLocaleTimeString()).reverse();
+            const hrData = vitals.map(v => v.heart_rate).reverse();
+
+            if (vitalsChart) vitalsChart.destroy();
+            
+            vitalsChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Heart Rate',
+                        data: hrData,
+                        borderColor: '#6366f1',
+                        tension: 0.3,
+                        fill: true,
+                        backgroundColor: 'rgba(99, 102, 241, 0.1)'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.05)' } },
+                        x: { grid: { display: false } }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>

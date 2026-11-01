@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Hospital System - Admin</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --success: #10b981;
+            --danger: #ef4444;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            max-width: 800px;
+            width: 100%;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 40px;
+            background: linear-gradient(to right, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            padding: 30px;
+            border-radius: 16px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+            margin-bottom: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        h2 {
+            margin-top: 0;
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 12px;
+            background: #334155;
+            border: 1px solid #475569;
+            border-radius: 8px;
+            color: white;
+            box-sizing: border-box;
+            transition: border-color 0.2s;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+
+        button:hover {
+            background-color: var(--primary-hover);
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid var(--success);
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏥 AI Hospital Admin</h1>
+
+        <div class="card">
+            <h2>Register Patient</h2>
+            <form id="registerForm">
+                <div class="form-group">
+                    <label>Patient Name</label>
+                    <input type="text" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>Age</label>
+                    <input type="number" name="age" required>
+                </div>
+                <div class="form-group">
+                    <label>Disease</label>
+                    <input type="text" name="disease" required>
+                </div>
+                <div class="form-group">
+                    <label>Doctor</label>
+                    <input type="text" name="doctor" required>
+                </div>
+                <div class="form-group">
+                    <label>Bed Number</label>
+                    <input type="text" name="bed_number" required>
+                </div>
+                <button type="submit">Register Patient</button>
+            </form>
+            <div id="registerResult" class="result"></div>
+        </div>
+
+        <div class="card">
+            <h2>Upload Vitals Image</h2>
+            <form id="vitalsForm">
+                <div class="form-group">
+                    <label>Patient ID</label>
+                    <input type="text" id="vitalsPatientId" name="patient_id" required>
+                </div>
+                <div class="form-group">
+                    <label>Monitor Snapshot</label>
+                    <input type="file" name="image" accept="image/*" required>
+                </div>
+                <button type="submit">Upload & Extract</button>
+            </form>
+            <div id="vitalsResult" class="result"></div>
+        </div>
+
+        <div class="card">
+            <h2>Assign Medicine</h2>
+            <form id="medicineForm">
+                <div class="form-group">
+                    <label>Patient ID</label>
+                    <input type="text" name="patient_id" required>
+                </div>
+                <div class="form-group">
+                    <label>Medicine Name</label>
+                    <input type="text" name="medicine_name" required>
+                </div>
+                <div class="form-group">
+                    <label>Quantity</label>
+                    <input type="number" name="quantity" required>
+                </div>
+                <button type="submit">Assign Medicine</button>
+            </form>
+            <div id="medicineResult" class="result"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = "http://localhost:8000";
+
+        document.getElementById('registerForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const res = await fetch(`${API_URL}/register_patient`, { method: 'POST', body: formData });
+            const data = await res.json();
+            const div = document.getElementById('registerResult');
+            div.innerHTML = `Success! Patient ID: <strong>${data.patient_id}</strong>`;
+            div.style.display = 'block';
+            document.getElementById('vitalsPatientId').value = data.patient_id;
+        };
+
+        document.getElementById('vitalsForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const res = await fetch(`${API_URL}/upload_vitals`, { method: 'POST', body: formData });
+            const data = await res.json();
+            const div = document.getElementById('vitalsResult');
+            div.innerHTML = `Vitals Extracted: HR: ${data.vitals.heart_rate}, SpO2: ${data.vitals.spo2}, Risk: ${data.risk_level}`;
+            div.style.display = 'block';
+        };
+
+        document.getElementById('medicineForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const res = await fetch(`${API_URL}/assign_medicine`, { method: 'POST', body: formData });
+            const data = await res.json();
+            const div = document.getElementById('medicineResult');
+            div.innerHTML = `Medicine Status: <strong>${data.availability}</strong>, Cost: $${data.cost}`;
+            div.style.display = 'block';
+        };
+    </script>
+</body>
+</html>

@@ -203,6 +203,10 @@ async def seed_admin():
                 }
             )
             print("Admin password verified", flush=True)
+
+        # Pre-warm PaddleOCR in background thread so user uploads are fast from the first scan
+        import asyncio
+        asyncio.create_task(asyncio.to_thread(get_extractor))
     except Exception as e:
         print(f"WARNING: MongoDB Atlas connection or authentication error: {e}", flush=True)
         print("Server remains running so Render can bind ports. Please verify your MONGODB_URI in Render dashboard.", flush=True)

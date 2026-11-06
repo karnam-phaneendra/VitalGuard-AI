@@ -540,16 +540,61 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
   const handleUploadVitals = async (e) => {
     e.preventDefault();
     setUploading(true);
-    const formData = new FormData(e.target);
-    formData.append('patient_id', patient_id);
+    const form = e.target;
+    const file = form.elements['image']?.files?.[0];
+    if (!file) {
+      setUploading(false);
+      return;
+    }
+
     try {
-      const res = await axios.post(`${API_BASE}/upload_vitals`, formData);
+      // Auto-compress large phone photos (> 2MB) before network transfer
+      const getOptimizedFile = async (f) => {
+        if (f.size <= 2 * 1024 * 1024) return f;
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const img = new Image();
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              const maxDim = 1600;
+              let w = img.width, h = img.height;
+              if (w > h && w > maxDim) { h = Math.round((h * maxDim) / w); w = maxDim; }
+              else if (h > maxDim) { w = Math.round((w * maxDim) / h); h = maxDim; }
+              canvas.width = w; canvas.height = h;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0, w, h);
+              canvas.toBlob((blob) => {
+                resolve(blob ? new File([blob], f.name, { type: 'image/jpeg' }) : f);
+              }, 'image/jpeg', 0.85);
+            };
+            img.src = ev.target.result;
+          };
+          reader.readAsDataURL(f);
+        });
+      };
+
+      const finalFile = await getOptimizedFile(file);
+      const formData = new FormData();
+      formData.append('patient_id', patient_id);
+      formData.append('image', finalFile);
+
+      const res = await axios.post(`${API_BASE}/upload_vitals`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 90000
+      });
+
       if (res.data.critical_alerts?.length > 0) {
         setAlert(res.data.critical_alerts[0]);
       }
       fetchData();
-    } catch (err) { alert("Upload failed: " + (err.response?.data?.detail || err.message)); }
-    finally { setUploading(false); }
+      form.reset();
+    } catch (err) {
+      console.error("Upload error:", err);
+      alert("Upload failed: " + (err.response?.data?.detail || err.message));
+    } finally {
+      setUploading(false);
+    }
   };
 
   const handleAssignMedicine = async (e) => {

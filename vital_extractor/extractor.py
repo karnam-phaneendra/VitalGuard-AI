@@ -43,12 +43,23 @@ class VitalExtractor:
     def __init__(self) -> None:
         """
         Initialize PaddleOCR once so it can be reused for multiple images.
+        Configured with strict low-memory flags to operate within 512MB RAM cloud containers.
         """
-        # Use basic, widely supported parameters so this works across
-        # different PaddleOCR versions.
+        import os
+        os.environ["FLAGS_allocator_strategy"] = "naive_best_fit"
+        os.environ["FLAGS_eager_delete_tensor_gb"] = "0.0"
+
+        # Low-memory configuration: omit angle classifier model (saves 150MB) and cap detection resolution
         self.ocr_engine = PaddleOCR(
             lang="en",
-            use_angle_cls=True,
+            use_angle_cls=False,
+            use_gpu=False,
+            enable_mkldnn=False,
+            cpu_threads=1,
+            det_limit_side_len=640,
+            det_limit_type='max',
+            max_batch_size=1,
+            show_log=False
         )
 
     # ------------------------------------------------------------------
@@ -57,19 +68,25 @@ class VitalExtractor:
     def run_ocr(self, image: np.ndarray) -> List[OcrToken]:
         """
         Run PaddleOCR on an image and convert results to tokens.
-
-        PaddleOCR has evolved over several major versions and the exact
-        structure of the OCR output can differ (lists, tuples, dicts,
-        additional wrappers, etc.). To stay compatible with v2 / v3 / v5
-        style outputs, this function walks the result recursively and
-        extracts any (box, text, score) triplets it can recognize.
+        Automatically scales large images to prevent memory spikes on constrained containers.
         """
-        # Some PaddleOCR versions do not support the `cls` flag here,
-        # so we call `ocr` with only the image argument for compatibility.
-        raw_results = self.ocr_engine.ocr(image)
+        import gc
+        import cv2
 
-        # Debug: show the raw structure coming back from PaddleOCR so it is
-        # easier to see which branch below is being used.
+        # Downscale large images (e.g. 4K camera photos) to max dimension 1024 to cap peak tensor memory
+        h, w = image.shape[:2]
+        max_dim = 1024
+        if max(h, w) > max_dim:
+            scale = max_dim / float(max(h, w))
+            new_w, new_h = int(w * scale), int(h * scale)
+            ocr_input = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        else:
+            ocr_input = image
+
+        raw_results = self.ocr_engine.ocr(ocr_input, cls=False)
+        gc.collect()
+
+        # Debug: show the raw structure coming back from PaddleOCR
         print("OCR raw result:", raw_results)
 
         if not raw_results:

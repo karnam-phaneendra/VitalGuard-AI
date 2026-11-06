@@ -160,6 +160,15 @@ def hash_password(password: str):
     return password_hash.hash(password)
 
 
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "VitalGuard AI Backend API",
+        "health": "/health",
+        "documentation": "/docs"
+    }
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "app": "VitalGuard AI"}

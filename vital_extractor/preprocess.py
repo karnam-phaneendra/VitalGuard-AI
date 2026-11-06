@@ -3,14 +3,16 @@ import numpy as np
 from typing import Tuple
 
 
-def load_image(image_path: str) -> np.ndarray:
+def load_image(image_path: str, max_dim: int = 800) -> np.ndarray:
     """
-    Load an image from disk using OpenCV.
+    Load an image from disk using OpenCV and downscale if too large.
 
     Parameters
     ----------
     image_path : str
         Path to the input image file.
+    max_dim : int
+        Maximum dimension (width or height) to prevent high memory usage.
 
     Returns
     -------
@@ -20,17 +22,24 @@ def load_image(image_path: str) -> np.ndarray:
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image at path: {image_path}")
+    h, w = image.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / float(max(h, w))
+        image = cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
     return image
 
 
-def load_image_from_bytes(image_bytes: bytes) -> np.ndarray:
+def load_image_from_bytes(image_bytes: bytes, max_dim: int = 800) -> np.ndarray:
     """
-    Decode an image directly from in-memory bytes (Zero-disk consumption).
+    Decode an image directly from in-memory bytes (Zero-disk consumption)
+    and downscale to max_dim immediately to prevent container Out-Of-Memory (OOM).
 
     Parameters
     ----------
     image_bytes : bytes
         Raw image file bytes.
+    max_dim : int
+        Maximum width or height in pixels (defaults to 800px).
 
     Returns
     -------
@@ -43,6 +52,12 @@ def load_image_from_bytes(image_bytes: bytes) -> np.ndarray:
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("Could not decode image from memory bytes.")
+    
+    h, w = image.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / float(max(h, w))
+        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
     return image
 
 

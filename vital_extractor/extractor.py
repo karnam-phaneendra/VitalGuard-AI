@@ -56,7 +56,7 @@ class VitalExtractor:
             use_gpu=False,
             enable_mkldnn=False,
             cpu_threads=1,
-            det_limit_side_len=640,
+            det_limit_side_len=480,
             det_limit_type='max',
             max_batch_size=1,
             show_log=False
@@ -73,12 +73,12 @@ class VitalExtractor:
         import gc
         import cv2
 
-        # Downscale large images (e.g. 4K camera photos) to max dimension 1024 to cap peak tensor memory
+        # Downscale large images to max dimension 640 to cap peak tensor memory well below 512MB RAM
         h, w = image.shape[:2]
-        max_dim = 1024
+        max_dim = 640
         if max(h, w) > max_dim:
             scale = max_dim / float(max(h, w))
-            new_w, new_h = int(w * scale), int(h * scale)
+            new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
             ocr_input = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
         else:
             ocr_input = image
@@ -367,9 +367,85 @@ class VitalExtractor:
     def extract_vitals_from_image(self, image: np.ndarray) -> Dict[str, Optional[Any]]:
         """
         Convenience method that runs OCR and then extracts vitals.
+        If GEMINI_API_KEY is configured, uses Gemini 1.5 Flash Vision (zero RAM on Render, 100% free),
+        otherwise falls back seamlessly to memory-optimized PaddleOCR.
         """
+        import os
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key:
+            try:
+                gemini_vitals = self._extract_with_gemini(image, gemini_key)
+                if gemini_vitals:
+                    print("Extracted vitals via Gemini 1.5 Flash Vision:", gemini_vitals, flush=True)
+                    return gemini_vitals
+            except Exception as e:
+                print(f"Gemini Vision API fallback to local OCR due to: {e}", flush=True)
+
         tokens = self.run_ocr(image)
         return self.extract_vitals_from_tokens(tokens)
+
+    def _extract_with_gemini(self, image: np.ndarray, api_key: str) -> Optional[Dict[str, Optional[Any]]]:
+        """
+        Extract vitals directly using Gemini 1.5 Flash Vision API.
+        Uses pure standard library (urllib.request) to prevent memory allocation.
+        """
+        import base64
+        import json
+        import urllib.request
+        import cv2
+
+        h, w = image.shape[:2]
+        if max(h, w) > 800:
+            scale = 800.0 / float(max(h, w))
+            image = cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+
+        _, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        b64_image = base64.b64encode(buffer).decode('utf-8')
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        prompt = (
+            "Analyze this bedside patient monitor or telemetry screenshot and extract vital signs.\n"
+            "Respond ONLY with a valid JSON object with EXACTLY these keys:\n"
+            "{\n"
+            '  "heart_rate": int or null,\n'
+            '  "blood_pressure": "systolic/diastolic" string or null,\n'
+            '  "spo2": int or null,\n'
+            '  "respiration": int or null,\n'
+            '  "temperature": float or null\n'
+            "}\n"
+            "Do NOT include markdown formatting, code blocks, or explanatory text. Return raw JSON only."
+        )
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": b64_image
+                        }
+                    }
+                ]
+            }]
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+            parsed = json.loads(text)
+            return {
+                "heart_rate": parsed.get("heart_rate"),
+                "blood_pressure": parsed.get("blood_pressure"),
+                "spo2": parsed.get("spo2"),
+                "respiration": parsed.get("respiration"),
+                "temperature": parsed.get("temperature"),
+            }
 
     def extract_vitals_from_tokens(
         self, tokens: List[OcrToken]

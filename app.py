@@ -114,18 +114,22 @@ async def verify_patient_active(patient_id: str):
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5174")
 
-origins = list({
+origins = [
     "http://localhost:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
-    FRONTEND_URL,
-    FRONTEND_ORIGIN
-})
+    "https://vital-guard-ai-rosy.vercel.app",
+]
+if FRONTEND_URL and FRONTEND_URL not in origins:
+    origins.append(FRONTEND_URL)
+if FRONTEND_ORIGIN and FRONTEND_ORIGIN not in origins:
+    origins.append(FRONTEND_ORIGIN)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

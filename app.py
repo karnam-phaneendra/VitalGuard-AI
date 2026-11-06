@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import shutil
 import os
+import cv2
+import base64
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,14 +30,21 @@ users_col = db.users
 
 # Agents
 from agents.risk_agent import analyze_vitals, detect_critical_alerts
-from agents.pharmacy_agent import check_medicine_availability, get_medicine_price
+from agents.pharmacy_agent import (
+    check_medicine_availability,
+    get_medicine_price,
+    find_medicine,
+    decrement_medicine_stock,
+    search_medicines,
+    get_inventory_summary
+)
 from agents.billing_agent import calculate_bill
 from agents.insurance_agent import check_insurance_eligibility
 from agents.doctor_agent import decide_discharge
 
 # Existing OCR Module
 from vital_extractor.extractor import VitalExtractor
-from vital_extractor.preprocess import preprocess_image, load_image
+from vital_extractor.preprocess import preprocess_image, load_image, load_image_from_bytes
 
 
 # Authentication Configuration
@@ -102,64 +111,92 @@ async def verify_patient_active(patient_id: str):
     return patient
 
 # CORS
-# CORS
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5174")
+
+origins = list({
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    FRONTEND_URL,
+    FRONTEND_ORIGIN
+})
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Static Files for Frontend
-os.makedirs("frontend", exist_ok=True)
-app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-# Static Files for PDF Reports
-os.makedirs("reports", exist_ok=True)
-app.mount("/reports", StaticFiles(directory="reports"), name="reports")
+# Static Directories
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
+UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
+REPORTS_DIR = os.path.join(BASE_DIR, "reports")
 
-# OCR Extractor Instance
-extractor = VitalExtractor()
+os.makedirs(FRONTEND_DIR, exist_ok=True)
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
+
+app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR), name="frontend")
+app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
+app.mount("/reports", StaticFiles(directory=REPORTS_DIR), name="reports")
+
+# OCR Extractor Instance (Lazy-loaded to allow instant port binding on Render / cloud containers)
+_extractor_instance = None
+
+def get_extractor():
+    global _extractor_instance
+    if _extractor_instance is None:
+        print("Initializing VitalExtractor (PaddleOCR)...", flush=True)
+        _extractor_instance = VitalExtractor()
+    return _extractor_instance
 
 # Helper for password hashing# Helper for password hashing - Argon2
 def hash_password(password: str):
     return password_hash.hash(password)
 
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "app": "VitalGuard AI"}
+
 # Admin account initialization
 @app.on_event("startup")
 async def seed_admin():
-    admin_email = os.getenv("ADMIN_EMAIL")
-    admin_password = os.getenv("ADMIN_PASSWORD")
+    # Verify MongoDB connection safely without crashing the web service on startup
+    try:
+        await db.command("ping")
+        print("MongoDB Connected Successfully!", flush=True)
 
-    if not admin_email or not admin_password:
-        raise RuntimeError("Admin credentials missing from environment")
+        admin_email = os.getenv("ADMIN_EMAIL", "admin@hospital.com")
+        admin_password = os.getenv("ADMIN_PASSWORD", "PHANI123@9999")
 
-    admin = await users_col.find_one({"email": admin_email})
-
-    if not admin:
-        await users_col.insert_one({
-            "email": admin_email,
-            "password": hash_password(admin_password),
-            "role": "admin"
-        })
-        print("Admin account created successfully")
-
-    else:
-        # Migrate existing SHA-256 password to Argon2
-        await users_col.update_one(
-            {"_id": admin["_id"]},
-            {
-                "$set": {
-                    "password": hash_password(admin_password),
-                    "role": "admin"
+        admin = await users_col.find_one({"email": admin_email})
+        if not admin:
+            await users_col.insert_one({
+                "email": admin_email,
+                "password": hash_password(admin_password),
+                "role": "admin"
+            })
+            print("Admin account created successfully", flush=True)
+        else:
+            await users_col.update_one(
+                {"_id": admin["_id"]},
+                {
+                    "$set": {
+                        "password": hash_password(admin_password),
+                        "role": "admin"
+                    }
                 }
-            }
-        )
-        print("Admin password migrated to Argon2")
+            )
+            print("Admin password verified", flush=True)
+    except Exception as e:
+        print(f"WARNING: MongoDB Atlas connection or authentication error: {e}", flush=True)
+        print("Server remains running so Render can bind ports. Please verify your MONGODB_URI in Render dashboard.", flush=True)
 
 
 # Login API
@@ -260,17 +297,19 @@ async def upload_vitals(
     await verify_admin(request)
     await verify_patient_active(patient_id)
 
-    os.makedirs("uploads", exist_ok=True)
-    file_path = os.path.join("uploads", f"{uuid.uuid4()}_{image.filename}")
-    
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(image.file, buffer)
-    
-    # OCR Extraction
+    # In-memory image processing: Zero server disk usage, immune to container storage limits!
     try:
-        img_bgr = load_image(file_path)
+        image_bytes = await image.read()
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded image is empty")
+        img_bgr = load_image_from_bytes(image_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Image decoding failed: {str(e)}")
+    
+    # OCR Extraction directly in memory
+    try:
         processed_img = preprocess_image(img_bgr)
-        extracted_vitals = extractor.extract_vitals_from_image(processed_img)
+        extracted_vitals = get_extractor().extract_vitals_from_image(processed_img)
         print("FINAL EXTRACTED VITALS:", extracted_vitals, flush=True)
         
         # Format vitals for agent and storage
@@ -285,10 +324,15 @@ async def upload_vitals(
         # Risk Agent Analysis
         risk_level = analyze_vitals(vitals)
         
+        # Lightweight base64 snapshot (stored safely in MongoDB Atlas, zero server disk usage)
+        _, buffer = cv2.imencode('.jpg', img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 65])
+        b64_snapshot = "data:image/jpeg;base64," + base64.b64encode(buffer).decode('utf-8')
+
         # Store Vitals
         vitals_data = {
             "patient_id": patient_id,
-            "image_path": str(file_path),
+            "image_path": image.filename,
+            "image_snapshot": b64_snapshot,
             "heart_rate": vitals.get("heart_rate"),
             "spo2": vitals.get("spo2"),
             "bp": vitals.get("bp"),
@@ -357,38 +401,117 @@ async def assign_medicine(request: Request, patient_id: str = Form(...), medicin
     p_id = patient_id.lower()
     await verify_patient_active(p_id)
 
-    availability = check_medicine_availability(medicine_name, quantity)
-    if availability == "out_of_stock":
-        # Alert doctor agent
+    med_info = find_medicine(medicine_name)
+    if not med_info:
         await alerts_col.insert_one({
             "patient_id": p_id,
             "alert_type": "PHARMACY_ALERT",
-            "message": f"Medicine {medicine_name} NOT available in pharmacy.",
+            "message": f"Medicine '{medicine_name}' NOT found in pharmacy inventory.",
             "timestamp": datetime.now()
         })
-        return {"status": "unavailable", "message": "Medicine not available"}
+        return {"status": "unavailable", "message": f"Medicine '{medicine_name}' not found in pharmacy."}
+
+    current_stock = med_info["quantity"]
+    if current_stock < quantity:
+        await alerts_col.insert_one({
+            "patient_id": p_id,
+            "alert_type": "PHARMACY_ALERT",
+            "message": f"Medicine '{med_info['medicine_name']}' has insufficient stock ({current_stock} available, requested {quantity}).",
+            "timestamp": datetime.now()
+        })
+        return {
+            "status": "unavailable",
+            "message": f"Insufficient stock for {med_info['medicine_name']}. Only {current_stock} units available."
+        }
     
-    price = get_medicine_price(medicine_name)
-    total_cost = price * quantity
+    unit_price = med_info["price"]
+    total_cost = round(unit_price * quantity, 2)
     
+    # Decrement stock in pharmacy dataset
+    remaining_stock = decrement_medicine_stock(med_info["medicine_name"], quantity)
+    if remaining_stock is None:
+        remaining_stock = max(0, current_stock - quantity)
+        
+    # Stock availability warning logic:
+    # < 50: RED WARNING
+    # <= 100: YELLOW WARNING
+    # > 100: Normal
+    if remaining_stock < 50:
+        warning_level = "red"
+        warning_msg = f"CRITICAL STOCK ALERT: Only {remaining_stock} units left of {med_info['medicine_name']} (< 50 units)!"
+        await alerts_col.insert_one({
+            "patient_id": p_id,
+            "alert_type": "CRITICAL_ALERT",
+            "message": warning_msg,
+            "timestamp": datetime.now()
+        })
+    elif remaining_stock <= 100:
+        warning_level = "yellow"
+        warning_msg = f"LOW STOCK WARNING: Only {remaining_stock} units left of {med_info['medicine_name']} (<= 100 units)."
+        await alerts_col.insert_one({
+            "patient_id": p_id,
+            "alert_type": "PHARMACY_WARNING",
+            "message": warning_msg,
+            "timestamp": datetime.now()
+        })
+    else:
+        warning_level = "none"
+        warning_msg = f"In stock: {remaining_stock} units remaining."
+        
     prescription = {
         "patient_id": p_id,
-        "medicine_name": medicine_name,
+        "medicine_name": med_info["medicine_name"],
+        "nickname": med_info.get("nickname", ""),
+        "generic_name": med_info.get("generic_name", ""),
         "quantity": quantity,
-        "price": price,
+        "price": unit_price,
         "total_cost": total_cost,
+        "stock_remaining": remaining_stock,
+        "stock_warning": warning_level,
         "status": "assigned",
         "timestamp": datetime.now()
     }
-    await prescriptions_col.insert_one(prescription)
+    res = await prescriptions_col.insert_one(prescription)
+    prescription["_id"] = str(res.inserted_id)
     
-    return {"status": "success", "availability": availability, "total_cost": total_cost}
+    return {
+        "status": "success",
+        "medicine_name": med_info["medicine_name"],
+        "unit_price": unit_price,
+        "total_cost": total_cost,
+        "stock_remaining": remaining_stock,
+        "warning_level": warning_level,
+        "warning_message": warning_msg
+    }
+
+@app.get("/pharmacy/lookup")
+async def pharmacy_lookup(q: str):
+    med = find_medicine(q)
+    if not med:
+        raise HTTPException(status_code=404, detail=f"Medicine '{q}' not found in pharmacy inventory.")
+    return med
+
+@app.get("/pharmacy/search")
+async def pharmacy_search(q: str = "", limit: int = 10):
+    if not q:
+        return []
+    return search_medicines(q, limit=limit)
+
+@app.get("/pharmacy/inventory")
+async def pharmacy_inventory(limit: int = 100, alert: Optional[str] = None):
+    return get_inventory_summary(limit=limit, filter_alert=alert)
 
 @app.get("/patient/{patient_id}")
 async def get_patient(patient_id: str):
     patient = await verify_patient_exists(patient_id)
     # Exclude _id from response
     patient_resp = {k: v for k, v in patient.items() if k != "_id"}
+    if patient_resp.get("discharge") or patient_resp.get("status") == "discharged":
+        patient_resp["status"] = "discharged"
+        patient_resp["discharge"] = True
+    else:
+        patient_resp["status"] = "active"
+        patient_resp["discharge"] = False
     return patient_resp
 
 @app.get("/vitals/{patient_id}")
@@ -424,10 +547,13 @@ async def get_billing(patient_id: str):
     days_admitted = max(1, (now - admission_date).days)
     
     # Use dynamic costs if set by admin, else defaults
-    bed_cost_per_day = patient.get("bed_cost_per_day", 500)
-    treatment_cost = patient.get("treatment_cost", 1000)
+    bed_cost_per_day = float(patient.get("bed_cost_per_day", 500))
+    treatment_cost = float(patient.get("treatment_cost", 1000))
     
     bill = calculate_bill(medicine_cost, days_admitted, bed_cost_per_day, treatment_cost)
+    
+    # Dynamic Insurance Coverage manually entered (NO default value!)
+    insurance_coverage = float(patient.get("insurance_coverage", 0.0))
     
     # Update or insert billing doc
     billing_doc = {
@@ -435,7 +561,8 @@ async def get_billing(patient_id: str):
         "bed_cost": bill['bed_cost'],
         "treatment_cost": treatment_cost,
         "total_bill": bill['total_bill'],
-        "bed_cost_per_day": bed_cost_per_day # Store for record
+        "bed_cost_per_day": bed_cost_per_day,
+        "insurance_coverage": insurance_coverage
     }
     
     await billing_col.update_one(
@@ -447,16 +574,11 @@ async def get_billing(patient_id: str):
         upsert=True
     )
     
-    insurance_status = check_insurance_eligibility(patient_id)
-    insurance_coverage = 0
-    if insurance_status == "approved":
-        insurance_coverage = 500  # Mock coverage amount
-    
     # Fetch payments
     payments = await payments_col.find({"patient_id": patient_id}).to_list(100)
-    paid_amount = sum(p.get("amount", 0) for p in payments)
+    paid_amount = sum(float(p.get("amount", 0) or 0) for p in payments)
     
-    remaining_balance = max(0, bill['total_bill'] - insurance_coverage - paid_amount)
+    remaining_balance = max(0.0, bill['total_bill'] - insurance_coverage - paid_amount)
     
     return {
         "medicine_cost": medicine_cost,
@@ -475,17 +597,17 @@ async def update_billing_costs(request: Request):
     await verify_admin(request)
     data = await request.json()
     patient_id = data.get("patient_id", "").lower()
-    field = data.get("field") # 'bed_cost_per_day' or 'treatment_cost'
+    field = data.get("field") # 'bed_cost_per_day', 'treatment_cost', or 'insurance_coverage'
     new_value = data.get("new_value")
     
-    if field not in ["bed_cost_per_day", "treatment_cost"]:
+    if field not in ["bed_cost_per_day", "treatment_cost", "insurance_coverage"]:
         raise HTTPException(status_code=400, detail="Invalid field")
         
     await patients_col.update_one(
         {"patient_id": patient_id},
         {"$set": {field: float(new_value)}}
     )
-    return {"status": "success"}
+    return {"status": "success", "field": field, "new_value": float(new_value)}
     
 @app.post("/add_payment")
 async def add_payment(
@@ -561,9 +683,12 @@ async def get_decision(patient_id: str):
 @app.get("/patients")
 async def get_all_patients():
     patients = await patients_col.find().to_list(100)
-    # Convert ObjectIDs to strings
+    # Convert ObjectIDs to strings and normalize status
     for p in patients:
         p["_id"] = str(p["_id"])
+        is_discharged = bool(p.get("discharge") or p.get("status") == "discharged")
+        p["status"] = "discharged" if is_discharged else "active"
+        p["discharge"] = is_discharged
     return patients
 
 @app.get("/alerts/{patient_id}")
@@ -591,13 +716,16 @@ async def get_latest_vitals(patient_id: str):
 @app.get("/prescriptions/{patient_id}")
 async def get_prescriptions(patient_id: str):
     patient_id = patient_id.lower()
-    print(f"DEBUG: Fetching prescriptions for {patient_id}")
     await verify_patient_exists(patient_id)
     cursor = prescriptions_col.find({"patient_id": patient_id}).sort("timestamp", -1)
     prescriptions = await cursor.to_list(length=100)
-    print(f"DEBUG: Found {len(prescriptions)} prescriptions")
     for p in prescriptions:
         p["_id"] = str(p["_id"])
+        med_info = find_medicine(p.get("medicine_name", ""))
+        if med_info:
+            p["stock_remaining"] = med_info.get("quantity", 0)
+            p["warning_level"] = med_info.get("warning_level", "none")
+            p["warning_message"] = med_info.get("warning_message", "")
     return prescriptions
 
 @app.delete("/prescription/{presc_id}")

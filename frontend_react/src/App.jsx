@@ -44,7 +44,7 @@ ChartJS.register(
   Filler
 );
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
 function App() {
   const [view, setView] = useState('login');
@@ -349,12 +349,21 @@ function AdminPanel({ logout, onSelectPatient, setAlert }) {
                         <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center text-indigo-400 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
                           <Activity size={24}/>
                         </div>
-                        <span className="text-[10px] font-bold text-gray-500 px-2 py-1 bg-white/5 rounded-md uppercase tracking-widest">{p.patient_id}</span>
+                        <div className="flex items-center gap-2">
+                          <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-wider rounded-lg border ${
+                            (p.discharge || p.status === 'discharged')
+                              ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                              : 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30'
+                          }`}>
+                            {(p.discharge || p.status === 'discharged') ? '● Discharged' : '● Active'}
+                          </span>
+                          <span className="text-[10px] font-bold text-gray-400 px-2 py-1 bg-white/5 rounded-md uppercase tracking-widest border border-white/5">{p.patient_id}</span>
+                        </div>
                       </div>
                       <h3 className="text-lg font-bold group-hover:text-indigo-400 transition-colors">{p.name || p.full_name}</h3>
                       <p className="text-sm text-gray-400 mb-4">{p.disease || p.primary_diagnosis || "General Checkup"}</p>
                       <div className="flex items-center gap-2 text-xs text-gray-500">
-                        <Calendar size={12}/> {new Date(p.admission_date.$date || p.admission_date).toLocaleDateString()}
+                        <Calendar size={12}/> {new Date(p.admission_date?.$date || p.admission_date || Date.now()).toLocaleDateString()}
                       </div>
                     </motion.div>
                   ))}
@@ -436,13 +445,28 @@ function AdminPanel({ logout, onSelectPatient, setAlert }) {
             <form onSubmit={async (e) => {
               e.preventDefault();
               const formData = new FormData(e.target);
-              const res = await axios.post(`${API_BASE}/assign_medicine`, formData);
-              alert(res.data.status === "success" ? `Assigned! Cost: ₹{res.data.total_cost}` : res.data.message);
+              try {
+                const res = await axios.post(`${API_BASE}/assign_medicine`, formData);
+                if (res.data.status === "success") {
+                  let msg = `Prescription Assigned!\nMedicine: ${res.data.medicine_name}\nUnit Price: ₹${res.data.unit_price}\nTotal: ₹${res.data.total_cost}\nStock Remaining: ${res.data.stock_remaining} units`;
+                  if (res.data.warning_level === "red") {
+                    msg += `\n\n🚨 CRITICAL ALERT: Stock is below 50 units!`;
+                  } else if (res.data.warning_level === "yellow") {
+                    msg += `\n\n⚠️ LOW STOCK WARNING: Stock is 100 units or lower!`;
+                  }
+                  alert(msg);
+                  e.target.reset();
+                } else {
+                  alert(res.data.message || "Could not assign medicine");
+                }
+              } catch (err) {
+                alert("Error: " + (err.response?.data?.detail || err.message));
+              }
             }} className="space-y-6">
-              <input name="patient_id" placeholder="Patient ID" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl" />
-              <input name="medicine_name" placeholder="Medicine Name" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl" />
-              <input name="quantity" type="number" placeholder="Quantity" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl" />
-              <button className="w-full bg-green-600 py-4 rounded-xl font-bold text-lg">Assign Prescription</button>
+              <input name="patient_id" placeholder="Patient ID (e.g., phani)" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-indigo-500" />
+              <input name="medicine_name" placeholder="Medicine Name or Nickname (e.g., cetirizine, dolo, pan)" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-indigo-500" />
+              <input name="quantity" type="number" min="1" placeholder="Quantity" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-indigo-500" />
+              <button className="w-full bg-emerald-600 hover:bg-emerald-500 py-4 rounded-xl font-bold text-lg text-white transition-all">Assign Prescription</button>
             </form>
           </div>
         )}
@@ -462,6 +486,11 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
   const [showPayForm, setShowPayForm] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [prescribing, setPrescribing] = useState(false);
+  
+  // Pharmacy autocomplete and live stock state
+  const [medQuery, setMedQuery] = useState("");
+  const [medSuggestions, setMedSuggestions] = useState([]);
+  const [selectedMed, setSelectedMed] = useState(null);
 
   const isAdmin = role === 'admin';
 
@@ -491,6 +520,23 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
     return () => clearInterval(inv);
   }, [patient_id]);
 
+  // Live pharmacy search
+  useEffect(() => {
+    if (!medQuery || medQuery.trim().length < 2) {
+      setMedSuggestions([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await axios.get(`${API_BASE}/pharmacy/search?q=${encodeURIComponent(medQuery.trim())}&limit=5`);
+        setMedSuggestions(res.data || []);
+      } catch (e) {
+        setMedSuggestions([]);
+      }
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [medQuery]);
+
   const handleUploadVitals = async (e) => {
     e.preventDefault();
     setUploading(true);
@@ -515,9 +561,18 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
       const res = await axios.post(`${API_BASE}/assign_medicine`, formData);
       if (res.data.status === "unavailable") {
         alert(res.data.message);
+      } else {
+        if (res.data.warning_level === "red") {
+          alert(`🚨 CRITICAL PHARMACY STOCK ALERT!\n${res.data.warning_message}`);
+        } else if (res.data.warning_level === "yellow") {
+          alert(`⚠️ LOW PHARMACY STOCK WARNING!\n${res.data.warning_message}`);
+        }
       }
       fetchData();
       e.target.reset();
+      setMedQuery("");
+      setMedSuggestions([]);
+      setSelectedMed(null);
     } catch (err) { alert("Prescription failed: " + (err.response?.data?.detail || err.message)); }
     finally { setPrescribing(false); }
   };
@@ -547,8 +602,12 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
   };
 
   const handleUpdateCost = async (field, label) => {
-    const currentValue = field === 'bed_cost_per_day' ? billing?.bed_rate : billing?.treatment_cost;
-    const newValue = window.prompt(`Enter new cost for ${label} (₹):`, currentValue);
+    let currentValue = 0;
+    if (field === 'bed_cost_per_day') currentValue = billing?.bed_rate || 500;
+    else if (field === 'treatment_cost') currentValue = billing?.treatment_cost || 1000;
+    else if (field === 'insurance_coverage') currentValue = billing?.insurance_coverage || 0;
+
+    const newValue = window.prompt(`Enter amount for ${label} (₹):`, currentValue);
     if (newValue === null || newValue === "" || isNaN(newValue)) return;
     
     try {
@@ -648,12 +707,21 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
             <section className="bg-[#1e293b] rounded-3xl p-8 border border-white/5 shadow-2xl">
               <div className="flex justify-between items-start mb-6">
                 <h3 className="text-xl font-bold flex items-center gap-3"><Users className="text-indigo-400"/> Patient Profile</h3>
-                <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border ${
-                  patient.status === 'critical' ? 'bg-red-500/10 border-red-500/50 text-red-500' : 
-                  patient.status === 'discharged' ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-500' :
-                  'bg-indigo-500/10 border-indigo-500/50 text-indigo-400'
+                <span className={`px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider border flex items-center gap-1.5 ${
+                  (patient.discharge || patient.status === 'discharged')
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400' 
+                    : patient.status === 'critical'
+                    ? 'bg-rose-500/15 border-rose-500/40 text-rose-400'
+                    : 'bg-cyan-500/15 border-cyan-500/40 text-cyan-400'
                 }`}>
-                  {patient.status || 'Admitted'}
+                  <span className={`w-2 h-2 rounded-full ${
+                    (patient.discharge || patient.status === 'discharged')
+                      ? 'bg-emerald-400'
+                      : patient.status === 'critical'
+                      ? 'bg-rose-400 animate-ping'
+                      : 'bg-cyan-400'
+                  }`}/>
+                  {(patient.discharge || patient.status === 'discharged') ? 'DISCHARGED' : (patient.status ? patient.status.toUpperCase() : 'ACTIVE')}
                 </span>
               </div>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
@@ -738,49 +806,151 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
               </div>
               
               {isAdmin && (
-                <form onSubmit={handleAssignMedicine} className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-                  <input name="medicine_name" placeholder="Medicine Name" required className="bg-[#0f172a] border border-white/5 rounded-xl p-3 text-xs focus:border-indigo-500 outline-none" />
-                  <input name="quantity" type="number" placeholder="Qty" required className="bg-[#0f172a] border border-white/5 rounded-xl p-3 text-xs focus:border-indigo-500 outline-none" />
-                  <button type="submit" disabled={prescribing} className="bg-indigo-600 hover:bg-indigo-500 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all disabled:opacity-50">
-                    {prescribing ? 'Checking...' : 'Assign'}
-                  </button>
-                </form>
+                <div className="mb-6 relative">
+                  <form onSubmit={handleAssignMedicine} className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="relative md:col-span-2">
+                      <input
+                        name="medicine_name"
+                        value={medQuery}
+                        onChange={(e) => setMedQuery(e.target.value)}
+                        placeholder="Search Indian Medicines / Nicknames (e.g. cetirizine, dolo, pan)"
+                        required
+                        autoComplete="off"
+                        className="w-full bg-[#0f172a] border border-white/10 rounded-xl p-3 text-xs focus:border-indigo-500 outline-none text-white placeholder-gray-500"
+                      />
+                      {medSuggestions.length > 0 && (
+                        <div className="absolute left-0 right-0 top-full mt-1 bg-[#0f172a] border border-white/15 rounded-xl shadow-2xl z-50 overflow-hidden divide-y divide-white/5 max-h-56 overflow-y-auto">
+                          {medSuggestions.map((item, idx) => {
+                            const isCrit = item.quantity < 50;
+                            const isLow = item.quantity <= 100;
+                            return (
+                              <div
+                                key={idx}
+                                onClick={() => {
+                                  setMedQuery(item.medicine_name);
+                                  setSelectedMed(item);
+                                  setMedSuggestions([]);
+                                }}
+                                className="p-2.5 hover:bg-white/5 cursor-pointer flex justify-between items-center text-xs transition-colors"
+                              >
+                                <div>
+                                  <p className="font-bold text-white text-xs">{item.medicine_name}</p>
+                                  <p className="text-[10px] text-gray-400">{item.generic_name || item.nickname || item.category}</p>
+                                </div>
+                                <div className="text-right">
+                                  <span className="font-bold text-emerald-400 block">₹{item.price?.toFixed(2)}</span>
+                                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                    isCrit ? 'bg-red-500/20 text-red-400 border border-red-500/30' : isLow ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-emerald-500/20 text-emerald-400'
+                                  }`}>
+                                    {isCrit ? `🚨 Critical (${item.quantity})` : isLow ? `⚠️ Low (${item.quantity})` : `✓ In Stock (${item.quantity})`}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        name="quantity"
+                        type="number"
+                        min="1"
+                        placeholder="Qty"
+                        required
+                        className="w-20 bg-[#0f172a] border border-white/10 rounded-xl p-3 text-xs focus:border-indigo-500 outline-none text-white text-center"
+                      />
+                      <button
+                        type="submit"
+                        disabled={prescribing}
+                        className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all disabled:opacity-50 text-white"
+                      >
+                        {prescribing ? 'Checking...' : 'Assign'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
               )}
 
-              {/* DEBUG: {JSON.stringify(prescriptions.length)} */}
               <div className="space-y-3">
-                {prescriptions.map((m, i) => (
-                  <div key={i} className="p-4 bg-[#0f172a]/60 rounded-2xl border border-white/5 hover:border-indigo-500/20 transition-all">
-                    <div className="flex justify-between items-center mb-2">
-                      <h4 className="font-bold text-white text-sm italic">{m.medicine_name}</h4>
-                      <div className="text-right flex flex-col items-end">
-                         <div className="flex items-center gap-2">
-                            {isAdmin && (
-                              <button onClick={() => handleDeleteMedicine(m._id)} className="p-1 hover:text-rose-500 transition-colors">
-                                <Trash2 size={12}/>
-                              </button>
-                            )}
-                            <span className="text-[10px] font-black text-indigo-400 block tracking-wider">₹{m.total_cost?.toLocaleString()}</span>
-                         </div>
-                         <span className="text-[8px] text-gray-600 font-bold uppercase tracking-tighter">Total Bill</span>
-                      </div>
-                    </div>
-                    <div className="flex justify-between items-end border-t border-white/5 pt-2">
-                      <div className="flex gap-4">
-                        <div className="space-y-0.5">
-                          <p className="text-[8px] text-gray-600 font-black uppercase">Qty</p>
-                          <p className="text-[10px] text-white font-bold">{m.quantity} Units</p>
+                {prescriptions.map((m, i) => {
+                  const stock = m.stock_remaining;
+                  const isCritical = (stock !== undefined && stock < 50) || m.warning_level === 'red';
+                  const isLow = (stock !== undefined && stock <= 100) || m.warning_level === 'yellow';
+
+                  return (
+                    <div key={i} className="p-4 bg-[#0f172a]/70 rounded-2xl border border-white/5 hover:border-indigo-500/30 transition-all space-y-2.5">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <h4 className="font-bold text-white text-sm">{m.medicine_name}</h4>
+                          <span className="text-[10px] text-gray-400">{m.generic_name || m.nickname || ''}</span>
                         </div>
-                        <div className="space-y-0.5">
-                          <p className="text-[8px] text-gray-600 font-black uppercase">Unit Price</p>
-                          <p className="text-[10px] text-white font-bold">₹{m.price?.toLocaleString() || '0'}</p>
+                        <div className="text-right flex flex-col items-end">
+                           <div className="flex items-center gap-2">
+                              {isAdmin && (
+                                <button onClick={() => handleDeleteMedicine(m._id)} className="p-1 hover:text-rose-500 transition-colors" title="Delete prescription">
+                                  <Trash2 size={13}/>
+                                </button>
+                              )}
+                              <span className="text-xs font-black text-indigo-400 block tracking-wider">₹{Number(m.total_cost || 0).toLocaleString()}</span>
+                           </div>
+                           <span className="text-[8px] text-gray-500 font-bold uppercase tracking-tighter">Total Cost</span>
                         </div>
                       </div>
-                      <span className="text-[8px] px-2 py-0.5 bg-indigo-500/10 text-indigo-400 rounded-lg uppercase font-black border border-indigo-500/10">{m.status || 'Active'}</span>
+
+                      <div className="flex justify-between items-center border-t border-white/5 pt-2 text-xs">
+                        <div className="flex gap-4">
+                          <div className="space-y-0.5">
+                            <p className="text-[8px] text-gray-500 font-black uppercase">Prescribed Qty</p>
+                            <p className="text-[11px] text-white font-bold">{m.quantity} Units</p>
+                          </div>
+                          <div className="space-y-0.5">
+                            <p className="text-[8px] text-gray-500 font-black uppercase">Unit Price</p>
+                            <p className="text-[11px] text-emerald-400 font-bold">₹{Number(m.price || 0).toFixed(2)}</p>
+                          </div>
+                        </div>
+                        <span className="text-[9px] px-2 py-0.5 bg-indigo-500/10 text-indigo-400 rounded-lg uppercase font-black border border-indigo-500/10">
+                          {m.status || 'Assigned'}
+                        </span>
+                      </div>
+
+                      {/* Real-time stock availability with Yellow/Red warning */}
+                      {stock !== undefined && (
+                        <div className="pt-2 border-t border-white/5">
+                          {isCritical ? (
+                            <div className="flex items-center justify-between p-2 rounded-xl bg-red-500/15 border border-red-500/30">
+                              <span className="text-[10px] font-bold text-red-400 flex items-center gap-1.5">
+                                🚨 Critical Stock Alert: {stock} units left (&lt; 50)
+                              </span>
+                              <span className="text-[8px] font-black uppercase tracking-wider text-red-300 bg-red-500/30 px-2 py-0.5 rounded">
+                                CRITICAL
+                              </span>
+                            </div>
+                          ) : isLow ? (
+                            <div className="flex items-center justify-between p-2 rounded-xl bg-amber-500/15 border border-amber-500/30">
+                              <span className="text-[10px] font-bold text-amber-300 flex items-center gap-1.5">
+                                ⚠️ Low Stock Warning: {stock} units left (≤ 100)
+                              </span>
+                              <span className="text-[8px] font-black uppercase tracking-wider text-amber-200 bg-amber-500/30 px-2 py-0.5 rounded">
+                                LOW STOCK
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="flex items-center justify-between p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                              <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1.5">
+                                ✓ Available in Stock: {stock} units
+                              </span>
+                              <span className="text-[8px] font-black uppercase tracking-wider text-emerald-300 bg-emerald-500/20 px-2 py-0.5 rounded">
+                                IN STOCK
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
-                {prescriptions.length === 0 && <p className="text-xs text-gray-600 italic py-4 text-center">No medications assigned</p>}
+                  );
+                })}
+                {prescriptions.length === 0 && <p className="text-xs text-gray-500 italic py-4 text-center">No medications assigned</p>}
               </div>
             </section>
 
@@ -791,7 +961,7 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
                 <div className="space-y-4 text-[11px]">
                   <div className="flex justify-between text-gray-400 items-center">
                     <span>Medicine Fees</span>
-                    <span className="text-white font-bold">₹{billing?.medicine_cost?.toLocaleString()}</span>
+                    <span className="text-white font-bold">₹{Number(billing?.medicine_cost || 0).toLocaleString()}</span>
                   </div>
                   
                   <div className="flex justify-between text-gray-400 items-center">
@@ -802,8 +972,8 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
                        )}
                     </div>
                     <div className="text-right">
-                       <span className="text-white font-bold block">₹{billing?.bed_cost?.toLocaleString()}</span>
-                       <span className="text-[8px] text-gray-500 italic">{billing?.bed_days} days @ ₹{billing?.bed_rate}/day</span>
+                       <span className="text-white font-bold block">₹{Number(billing?.bed_cost || 0).toLocaleString()}</span>
+                       <span className="text-[8px] text-gray-500 italic">{billing?.bed_days || 1} days @ ₹{billing?.bed_rate || 500}/day</span>
                     </div>
                   </div>
 
@@ -814,32 +984,38 @@ function PatientDashboard({ patient_id, role, logout, setAlert, onDischarge }) {
                          <button onClick={() => handleUpdateCost('treatment_cost', 'Treatment')} className="text-[9px] text-indigo-400 hover:text-indigo-300 font-bold uppercase underline">Update</button>
                        )}
                     </div>
-                    <span className="text-white font-bold">₹{billing?.treatment_cost?.toLocaleString()}</span>
+                    <span className="text-white font-bold">₹{Number(billing?.treatment_cost || 0).toLocaleString()}</span>
+                  </div>
+
+                  {/* Manual Insurance Coverage Option (No default mock value, manually editable) */}
+                  <div className="flex justify-between text-gray-400 items-center pt-1 border-t border-white/5">
+                    <div className="flex items-center gap-2">
+                       <span>Insurance Coverage</span>
+                       {isAdmin && (
+                         <button onClick={() => handleUpdateCost('insurance_coverage', 'Insurance Coverage')} className="text-[9px] text-indigo-400 hover:text-indigo-300 font-bold uppercase underline">Update</button>
+                       )}
+                    </div>
+                    <span className={`font-bold ${billing?.insurance_coverage > 0 ? 'text-emerald-400' : 'text-gray-400'}`}>
+                      {billing?.insurance_coverage > 0 ? `- ₹${Number(billing.insurance_coverage).toLocaleString()}` : '₹0'}
+                    </span>
                   </div>
                 </div>
                 
                 <div className="border-t border-white/10 pt-4 flex justify-between items-end">
-                  <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest">Total Bill:</span>
-                  <span className="text-2xl font-black text-white">₹{billing?.total_bill?.toLocaleString()}</span>
+                  <span className="text-[9px] text-gray-400 font-black uppercase tracking-widest">Total Bill:</span>
+                  <span className="text-2xl font-black text-white">₹{Number(billing?.total_bill || 0).toLocaleString()}</span>
                 </div>
-                
-                {billing?.insurance_coverage > 0 && (
-                  <div className="flex justify-between text-[10px] text-emerald-400 font-bold px-1">
-                    <span>Insurance Coverage</span>
-                    <span>- ₹{billing.insurance_coverage.toLocaleString()}</span>
-                  </div>
-                )}
 
                 {billing?.paid_amount > 0 && (
-                  <div className="flex justify-between text-[10px] text-blue-400 font-bold px-1">
+                  <div className="flex justify-between text-[10px] text-cyan-400 font-bold px-1">
                     <span>Paid Amount</span>
-                    <span>- ₹{billing.paid_amount.toLocaleString()}</span>
+                    <span>- ₹{Number(billing.paid_amount).toLocaleString()}</span>
                   </div>
                 )}
 
                 <div className="p-4 bg-indigo-500/10 rounded-2xl flex flex-col items-center justify-center border border-indigo-500/20">
                   <span className="text-[9px] font-black uppercase text-indigo-400 mb-1">Balance Remaining</span>
-                  <span className="text-3xl font-black text-white">₹{billing?.remaining_balance?.toLocaleString()}</span>
+                  <span className="text-3xl font-black text-white">₹{Number(billing?.remaining_balance || 0).toLocaleString()}</span>
                 </div>
               </div>
             </section>

@@ -23,6 +23,29 @@ def load_image(image_path: str) -> np.ndarray:
     return image
 
 
+def load_image_from_bytes(image_bytes: bytes) -> np.ndarray:
+    """
+    Decode an image directly from in-memory bytes (Zero-disk consumption).
+
+    Parameters
+    ----------
+    image_bytes : bytes
+        Raw image file bytes.
+
+    Returns
+    -------
+    np.ndarray
+        Decoded image in BGR format.
+    """
+    if not image_bytes:
+        raise ValueError("Empty image bytes received.")
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Could not decode image from memory bytes.")
+    return image
+
+
 def preprocess_image(image: np.ndarray) -> np.ndarray:
     """
     Apply a set of preprocessing operations to improve OCR accuracy.

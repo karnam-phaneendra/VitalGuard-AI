@@ -42,3 +42,6 @@ frontend_react/dist/
 
 # Local backup and log files
 *.log
+
+# Local Database data
+data/
